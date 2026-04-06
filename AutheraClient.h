@@ -57,7 +57,7 @@ namespace Authera {
     private:
         std::string m_AppId;
         std::string m_ClientKey;
-        std::string m_BaseUrl = "https://rycbncvtdkldnlyfxtak.supabase.co/functions/v1";
+        std::string m_BaseUrl = "https://bhdvbvmfnorzuclomnvx.supabase.co/functions/v1";
 
         std::string GetHardwareId();
         std::string GenerateHmacSha256(const std::string& payload, const std::string& secret);

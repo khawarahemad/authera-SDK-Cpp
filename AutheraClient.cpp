@@ -1,6 +1,6 @@
 #include "AutheraClient.h"
 #include <windows.h>
-#include <winhttp.h>
+#include <wininet.h>
 #include <bcrypt.h>
 #include <iostream>
 #include <vector>
@@ -10,12 +10,58 @@
 
 #include "include/json.hpp" // nlohmann/json
 
-#pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "ws2_32.lib")
+
+// Define missing WinINet constants if not already defined
+#ifndef INTERNET_OPEN_TYPE_DEFAULT_PROXY
+#define INTERNET_OPEN_TYPE_DEFAULT_PROXY 1
+#endif
+
+#ifndef ERROR_INTERNET_CONNECTION_CLOSED
+#define ERROR_INTERNET_CONNECTION_CLOSED 12030
+#endif
+
+#ifndef WININET_E_TIMEOUT
+#define WININET_E_TIMEOUT 12002
+#endif
 
 using json = nlohmann::json;
 
 namespace Authera {
+
+    // Windows Internet error code mapper
+    std::string GetWinINetErrorMessage(DWORD dwError) {
+        switch (dwError) {
+            case ERROR_INTERNET_NAME_NOT_RESOLVED:
+                return "ERROR_INTERNET_NAME_NOT_RESOLVED (12007): DNS resolution failed - domain cannot be resolved";
+            case ERROR_INTERNET_CONNECTION_RESET:
+                return "ERROR_INTERNET_CONNECTION_RESET (12031): Connection was reset by the server";
+            case ERROR_INTERNET_CONNECTION_CLOSED:
+                return "ERROR_INTERNET_CONNECTION_CLOSED (12030): Connection was closed by the server";
+            case ERROR_INTERNET_TIMEOUT:
+                return "ERROR_INTERNET_TIMEOUT (12002): Operation timed out";
+            case ERROR_INTERNET_INVALID_URL:
+                return "ERROR_INTERNET_INVALID_URL (12005): URL format is invalid";
+            case ERROR_INTERNET_OPERATION_CANCELLED:
+                return "ERROR_INTERNET_OPERATION_CANCELLED (12017): Operation was cancelled by user or system";
+            case ERROR_INTERNET_SEC_CERT_CN_INVALID:
+                return "ERROR_INTERNET_SEC_CERT_CN_INVALID (12038): Certificate CN does not match hostname";
+            case ERROR_INTERNET_SEC_INVALID_CERT:
+                return "ERROR_INTERNET_SEC_INVALID_CERT (12055): Invalid or untrusted certificate";
+            case ERROR_INTERNET_CANNOT_CONNECT:
+                return "ERROR_INTERNET_CANNOT_CONNECT (12029): Cannot establish connection to server";
+            case ERROR_INTERNET_INVALID_OPERATION:
+                return "ERROR_INTERNET_INVALID_OPERATION (12043): Invalid operation for current state";
+            case WININET_E_TIMEOUT:
+                return "WININET_E_TIMEOUT: Network timeout occurred";
+            case ERROR_NOT_ENOUGH_MEMORY:
+                return "ERROR_NOT_ENOUGH_MEMORY: Insufficient memory for operation";
+            default:
+                return "Unknown error code: " + std::to_string(dwError);
+        }
+    }
 
     Client::Client(const std::string& appId, const std::string& clientKey)
         : m_AppId(appId), m_ClientKey(clientKey)
@@ -64,45 +110,198 @@ namespace Authera {
     }
 
     std::string Client::SendPostRequest(const std::string& urlPath, const std::string& payloadJson, const std::string& signature) {
-        std::string parsedResponse = "";
+        std::string responseData = "";
+
+        // Extract hostname from m_BaseUrl (e.g., "https://bhdvbvmfnorzuclomnvx.supabase.co/functions/v1")
+        // Result should be: "bhdvbvmfnorzuclomnvx.supabase.co"
+        size_t protocolEnd = m_BaseUrl.find("://");
+        if (protocolEnd == std::string::npos) {
+            std::cerr << "[ERROR] Invalid m_BaseUrl format: " << m_BaseUrl << std::endl;
+            return "";
+        }
         
-        // Parse Host
-        std::wstring host = L"rycbncvtdkldnlyfxtak.supabase.co";
-        std::wstring path = std::wstring(urlPath.begin(), urlPath.end());
+        size_t hostStart = protocolEnd + 3;
+        size_t pathStart = m_BaseUrl.find("/", hostStart);
+        std::string hostname = m_BaseUrl.substr(hostStart, pathStart - hostStart);
+        
+        std::cerr << "[DEBUG] Using m_BaseUrl: " << m_BaseUrl << std::endl;
+        std::cerr << "[DEBUG] Extracted hostname: " << hostname << std::endl;
 
-        HINTERNET hSession = WinHttpOpen(L"Authera SDK/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-        if (hSession) {
-            HINTERNET hConnect = WinHttpConnect(hSession, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
-            if (hConnect) {
-                HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-                if (hRequest) {
-                    
-                    std::string headerStr = "Content-Type: application/json\r\nX-Authera-Signature: " + signature + "\r\n";
-                    std::wstring headers(headerStr.begin(), headerStr.end());
-                    
-                    if (WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)-1, (LPVOID)payloadJson.c_str(), (DWORD)payloadJson.length(), (DWORD)payloadJson.length(), 0)) {
-                        if (WinHttpReceiveResponse(hRequest, NULL)) {
-                            DWORD size = 0;
-                            DWORD downloaded = 0;
-                            do {
-                                WinHttpQueryDataAvailable(hRequest, &size);
-                                if (size == 0) break;
+        // Internet open - try system proxy first, then fallback to direct
+        HINTERNET hInternet = InternetOpenA(
+            "Authera SDK/1.0",
+            INTERNET_OPEN_TYPE_PRECONFIG,  // Use system proxy settings
+            NULL,
+            NULL,
+            0
+        );
 
-                                std::vector<char> outBuffer(size + 1, 0);
-                                if (WinHttpReadData(hRequest, (LPVOID)outBuffer.data(), size, &downloaded)) {
-                                    parsedResponse.append(outBuffer.data(), downloaded);
-                                }
-                            } while (size > 0);
-                        }
-                    }
-                    WinHttpCloseHandle(hRequest);
-                }
-                WinHttpCloseHandle(hConnect);
-            }
-            WinHttpCloseHandle(hSession);
+        if (!hInternet) {
+            // Fallback: Try with default proxy
+            hInternet = InternetOpenA(
+                "Authera SDK/1.0",
+                INTERNET_OPEN_TYPE_DEFAULT_PROXY,
+                NULL,
+                NULL,
+                0
+            );
         }
 
-        return parsedResponse;
+        if (!hInternet) {
+            // Last resort: Try direct connection
+            hInternet = InternetOpenA(
+                "Authera SDK/1.0",
+                INTERNET_OPEN_TYPE_DIRECT,
+                NULL,
+                NULL,
+                0
+            );
+        }
+
+        if (!hInternet) {
+            DWORD dwError = GetLastError();
+            std::cerr << "[ERROR] InternetOpen failed: " << GetWinINetErrorMessage(dwError) << std::endl;
+            return "";
+        }
+        
+        std::cerr << "[DEBUG] Internet session opened successfully" << std::endl;
+
+        // Connect to server using extracted hostname
+        HINTERNET hConnect = InternetConnectA(
+            hInternet,
+            hostname.c_str(),
+            INTERNET_DEFAULT_HTTPS_PORT,
+            NULL,
+            NULL,
+            INTERNET_SERVICE_HTTP,
+            0,
+            0
+        );
+
+        if (!hConnect) {
+            DWORD dwError = GetLastError();
+            std::cerr << "[ERROR] InternetConnect failed: " << GetWinINetErrorMessage(dwError) << std::endl;
+            std::cerr << "[ERROR] Cannot connect to " << hostname << ":443" << std::endl;
+            InternetCloseHandle(hInternet);
+            return "";
+        }
+
+        std::cerr << "[DEBUG] Connected to " << hostname << " successfully" << std::endl;
+
+        // Open request handle with URL path
+        DWORD dwFlags = INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD;
+        HINTERNET hRequest = HttpOpenRequestA(
+            hConnect,
+            "POST",
+            urlPath.c_str(),
+            "HTTP/1.1",
+            NULL,
+            NULL,
+            dwFlags,
+            0
+        );
+
+        if (!hRequest) {
+            DWORD dwError = GetLastError();
+            std::cerr << "[ERROR] HttpOpenRequest failed: " << GetWinINetErrorMessage(dwError) << std::endl;
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return "";
+        }
+
+        std::cerr << "[DEBUG] Request handle created for POST " << urlPath << std::endl;
+
+        // Set timeout values for connection
+        DWORD dwTimeout = 30000; // 30 seconds
+        InternetSetOptionA(hRequest, INTERNET_OPTION_CONNECT_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+        InternetSetOptionA(hRequest, INTERNET_OPTION_SEND_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+        InternetSetOptionA(hRequest, INTERNET_OPTION_RECEIVE_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+
+        // Set headers - proper format for HttpSendRequestA
+        // Headers should be null-terminated and separated by \r\n, with final \r\n
+        std::string contentLengthHeader = "Content-Length: " + std::to_string(payloadJson.length()) + "\r\n";
+        std::string headersStr = "Content-Type: application/json\r\n" + contentLengthHeader + "X-Authera-Signature: " + signature + "\r\n";
+        
+        std::cerr << "[DEBUG] Headers being sent:" << std::endl;
+        std::cerr << "[DEBUG]   Content-Type: application/json" << std::endl;
+        std::cerr << "[DEBUG]   Content-Length: " << payloadJson.length() << std::endl;
+        std::cerr << "[DEBUG]   X-Authera-Signature: " << signature << std::endl;
+        
+        // Send request
+        std::cerr << "[DEBUG] Sending request to: " << urlPath << std::endl;
+        std::cerr << "[DEBUG] Payload: " << payloadJson << std::endl;
+        std::cerr << "[DEBUG] Payload size: " << payloadJson.length() << " bytes" << std::endl;
+        
+        BOOL bSend = HttpSendRequestA(
+            hRequest,
+            headersStr.c_str(),
+            (DWORD)-1,  // -1 means lpszHeaders is null-terminated
+            (LPVOID)payloadJson.c_str(),
+            (DWORD)payloadJson.length()
+        );
+
+        if (!bSend) {
+            DWORD dwError = GetLastError();
+            std::cerr << "[ERROR] HttpSendRequest failed!" << std::endl;
+            std::cerr << "[ERROR] " << GetWinINetErrorMessage(dwError) << std::endl;
+            
+            // Special diagnostic for DNS failures
+            if (dwError == ERROR_INTERNET_NAME_NOT_RESOLVED) {
+                std::cerr << "[CRITICAL] DNS RESOLUTION FAILED!" << std::endl;
+                std::cerr << "[CRITICAL] Domain 'rycbncvtdkldnlyfxtak.supabase.co' cannot be resolved" << std::endl;
+                std::cerr << "[CRITICAL] Check: " << std::endl;
+                std::cerr << "  1. Internet connectivity" << std::endl;
+                std::cerr << "  2. DNS server configuration" << std::endl;
+                std::cerr << "  3. Network firewall/proxy blocking DNS" << std::endl;
+                std::cerr << "  4. Windows Defender blocking DNS resolution" << std::endl;
+                std::cerr << "  5. run 'nslookup rycbncvtdkldnlyfxtak.supabase.co' in command prompt" << std::endl;
+            }
+            
+            InternetCloseHandle(hRequest);
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return "";
+        }
+        
+        std::cerr << "[DEBUG] Request sent successfully" << std::endl;
+
+        // Get HTTP status code
+        DWORD dwStatusCode = 0;
+        DWORD dwStatusCodeSize = sizeof(dwStatusCode);
+        if (HttpQueryInfoA(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, 
+                          &dwStatusCode, &dwStatusCodeSize, NULL)) {
+            std::cerr << "[DEBUG] HTTP Status Code: " << dwStatusCode << std::endl;
+        }
+
+        // Read response
+        const DWORD BUFFER_SIZE = 4096;
+        char szBuffer[BUFFER_SIZE];
+        DWORD dwBytesRead = 0;
+
+        while (InternetReadFile(hRequest, szBuffer, BUFFER_SIZE, &dwBytesRead)) {
+            if (dwBytesRead == 0) {
+                break;
+            }
+            responseData.append(szBuffer, dwBytesRead);
+        }
+        
+        if (responseData.empty()) {
+            DWORD dwError = GetLastError();
+            if (dwError != 0) {
+                std::cerr << "[ERROR] InternetReadFile failed: " << GetWinINetErrorMessage(dwError) << std::endl;
+            }
+        }
+        
+        std::cerr << "[DEBUG] Response received: " << responseData.length() << " bytes" << std::endl;
+
+        // Cleanup
+        InternetCloseHandle(hRequest);
+        InternetCloseHandle(hConnect);
+        InternetCloseHandle(hInternet);
+        
+        std::cerr << "[DEBUG] Connection closed" << std::endl;
+
+        return responseData;
     }
 
     ValidationResult Client::ValidateLicense(const std::string& licenseKey) {
@@ -174,9 +373,14 @@ namespace Authera {
             return result;
         }
 
+        // Debug: Print raw response
+        std::cerr << "[DEBUG] Raw response data: " << rawResp << std::endl;
+
         try {
             auto resObj = json::parse(rawResp);
+            std::cerr << "[DEBUG] Parsed JSON successfully" << std::endl;
             if (!resObj.contains("valid") || !resObj["valid"].get<bool>()) {
+                std::cerr << "[DEBUG] Response does not have valid=true" << std::endl;
                 result.Error = resObj.value("error", "Unknown login error");
                 return result;
             }
