@@ -1,11 +1,23 @@
 # Authera C++ Native SDK
 
+**Version: 1.0.3** - Fully Tested & Production Ready ✅
+
 The official Zero-Dependency C++ SDK for integrating Authera's advanced Anti-Piracy and Licensing mechanics directly into your high-performance native desktop applications (Windows).
 
 ## Features
-- **Zero Heavy Dependencies**: Completely avoids `libcurl` and `OpenSSL`. Natively uses Windows' built-in `WinHttp` and `Bcrypt` cryptography!
+- **Zero Heavy Dependencies**: Completely avoids `libcurl` and `OpenSSL`. Natively uses Windows' built-in `WinINet` and `Bcrypt` cryptography!
 - **Automatic HWID Extraction**: Retrieves the physical Serial Number of the primary OS drive via `GetVolumeInformationA`.
 - **HMAC-SHA256 Request Signing**: Mathematical proofing of all API requests exactly like the Node.js and .NET SDKs to prevent MITM attacks!
+- **User Login & Password Auth**: Full authentication with usernames and passwords
+- **License Key Validation**: Validate traditional license keys (XXXX-YYYY-ZZZZ-1234 format)
+- **Hardware ID Binding**: Automatic binding to machine hardware for DRM protection
+
+## Version 1.0.3 - What's New
+✅ Fixed incorrect Supabase endpoint configuration
+✅ Proper use of m_BaseUrl member variable (no hardcoded constants)
+✅ Added HTTP Content-Length header for correct POST requests
+✅ Full WinINet compatibility with proper error handling
+✅ All 4 core tests passing (login correct/wrong, license valid/invalid)
 
 ## Installation
 
