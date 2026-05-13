@@ -1,6 +1,6 @@
 # Authera C++ Native SDK
 
-**Version: 1.0.3** - Fully Tested & Production Ready ✅
+**Version: 1.1.0** - Fully Tested & Production Ready ✅
 
 The official Zero-Dependency C++ SDK for integrating Authera's advanced Anti-Piracy and Licensing mechanics directly into your high-performance native desktop applications (Windows).
 
@@ -11,13 +11,13 @@ The official Zero-Dependency C++ SDK for integrating Authera's advanced Anti-Pir
 - **User Login & Password Auth**: Full authentication with usernames and passwords
 - **License Key Validation**: Validate traditional license keys (XXXX-YYYY-ZZZZ-1234 format)
 - **Hardware ID Binding**: Automatic binding to machine hardware for DRM protection
+- **Smart Auto-Updates**: Natively connects to your Cloudflare R2 bucket to auto-download App Releases, caching versions locally in `%APPDATA%` to save bandwidth!
 
-## Version 1.0.3 - What's New
-✅ Fixed incorrect Supabase endpoint configuration
-✅ Proper use of m_BaseUrl member variable (no hardcoded constants)
-✅ Added HTTP Content-Length header for correct POST requests
-✅ Full WinINet compatibility with proper error handling
-✅ All 4 core tests passing (login correct/wrong, license valid/invalid)
+## Version 1.1.0 - What's New
+✅ Implemented `CheckForUpdate()` system for downloading app releases.
+✅ Smart caching: Locally stores version info in `%APPDATA%` to prevent redundant downloads.
+✅ Fully secure: Downloads are protected behind your App's HMAC-SHA256 API Signature.
+✅ Fixed redirect bugs by parsing S3/R2 presigned URLs securely.
 
 ## Installation
 
@@ -26,7 +26,7 @@ This is designed to be as lightweight as possible. It is NOT provided as a `.dll
 You must copy the Source Code files directly into your project:
 
 1. Copy `AutheraClient.h` and `AutheraClient.cpp` to your Visual Studio Project.
-2. Under your Project Properties, ensure your standard libraries are appropriately linked. (The `.cpp` file already uses `#pragma comment(lib)` so you don't even need to configure your Linker!).
+2. Under your Project Properties, ensure your standard libraries are appropriately linked. (The `.cpp` file already uses `#pragma comment(lib)` for `bcrypt.lib`, `wininet.lib`, `ws2_32.lib`, and `shell32.lib`, so you don't even need to configure your Linker if you use MSVC!).
 3. Ensure you have copied the `include/json.hpp` file from `nlohmann` into your project directory as well.
 
 ## Basic Usage
@@ -79,6 +79,38 @@ int main()
     } else {
         std::cerr << "[-] Login Failed: " << res.Error << std::endl;
         return -1;
+    }
+
+    return 0;
+}
+```
+
+### Option C: Smart Auto-Updates
+
+The SDK includes a built-in auto-updater. It automatically stores your app's version locally in `%APPDATA%/Authera/`. When you call `CheckForUpdate()`, it compares your local version against the latest active release on the server. If a new version exists (or if the user deleted the executable), it downloads it directly into the AppData folder.
+
+```cpp
+#include <iostream>
+#include "AutheraClient.h"
+
+int main()
+{
+    Authera::Client authera("APP-UUID-FROM-DASHBOARD", "APP-API-KEY-FROM-DASHBOARD");
+
+    std::cout << "[*] Checking for updates..." << std::endl;
+    Authera::UpdateResult res = authera.CheckForUpdate();
+
+    if (res.Success) {
+        if (res.UpToDate) {
+            std::cout << "[+] You are already on the latest version! (" << res.Version << ")" << std::endl;
+        } else if (res.FileDownloaded) {
+            std::cout << "[+] Successfully downloaded new update! (" << res.Version << ")" << std::endl;
+            std::cout << "[+] File is located at: " << res.FilePath << std::endl;
+            
+            // You can now execute res.FilePath using ShellExecute or CreateProcess and exit this app!
+        }
+    } else {
+        std::cerr << "[-] Update check failed: " << res.Error << std::endl;
     }
 
     return 0;
