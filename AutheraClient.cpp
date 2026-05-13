@@ -2,17 +2,20 @@
 #include <windows.h>
 #include <wininet.h>
 #include <bcrypt.h>
+#include <shlobj.h>
 #include <iostream>
 #include <vector>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <fstream>
 
 #include "include/json.hpp" // nlohmann/json
 
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // Define missing WinINet constants if not already defined
 #ifndef INTERNET_OPEN_TYPE_DEFAULT_PROXY
@@ -400,6 +403,238 @@ namespace Authera {
         }
 
         return result;
+    }
+
+    bool Client::SendGetRequestToFile(const std::string& fullUrl, const std::string& savePath, std::string& outError) {
+        size_t protocolEnd = fullUrl.find("://");
+        if (protocolEnd == std::string::npos) {
+            outError = "Invalid Download URL format";
+            return false;
+        }
+        
+        size_t hostStart = protocolEnd + 3;
+        size_t pathStart = fullUrl.find("/", hostStart);
+        std::string hostname = fullUrl.substr(hostStart, pathStart - hostStart);
+        std::string urlPath = pathStart != std::string::npos ? fullUrl.substr(pathStart) : "/";
+
+        HINTERNET hInternet = InternetOpenA("Authera SDK/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+        if (!hInternet) hInternet = InternetOpenA("Authera SDK/1.0", INTERNET_OPEN_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
+        if (!hInternet) hInternet = InternetOpenA("Authera SDK/1.0", INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
+
+        if (!hInternet) {
+            outError = "InternetOpen failed: " + GetWinINetErrorMessage(GetLastError());
+            return false;
+        }
+
+        HINTERNET hConnect = InternetConnectA(hInternet, hostname.c_str(), INTERNET_DEFAULT_HTTPS_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
+        if (!hConnect) {
+            outError = "InternetConnect failed: " + GetWinINetErrorMessage(GetLastError());
+            InternetCloseHandle(hInternet);
+            return false;
+        }
+
+        DWORD dwFlags = INTERNET_FLAG_SECURE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTP | INTERNET_FLAG_IGNORE_REDIRECT_TO_HTTPS | INTERNET_FLAG_KEEP_CONNECTION;
+        
+        HINTERNET hRequest = HttpOpenRequestA(hConnect, "GET", urlPath.c_str(), "HTTP/1.1", NULL, NULL, dwFlags, 0);
+        if (!hRequest) {
+            outError = "HttpOpenRequest failed: " + GetWinINetErrorMessage(GetLastError());
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return false;
+        }
+
+        DWORD dwTimeout = 60000; // 60 seconds
+        InternetSetOptionA(hRequest, INTERNET_OPTION_CONNECT_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+        InternetSetOptionA(hRequest, INTERNET_OPTION_SEND_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+        InternetSetOptionA(hRequest, INTERNET_OPTION_RECEIVE_TIMEOUT, &dwTimeout, sizeof(dwTimeout));
+
+        BOOL bSend = HttpSendRequestA(hRequest, NULL, 0, NULL, 0);
+        if (!bSend) {
+            outError = "HttpSendRequest failed: " + GetWinINetErrorMessage(GetLastError());
+            InternetCloseHandle(hRequest);
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return false;
+        }
+
+        DWORD dwStatusCode = 0;
+        DWORD dwStatusCodeSize = sizeof(dwStatusCode);
+        HttpQueryInfoA(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &dwStatusCode, &dwStatusCodeSize, NULL);
+        
+        if (dwStatusCode >= 400) {
+            outError = "HTTP Error " + std::to_string(dwStatusCode);
+            InternetCloseHandle(hRequest);
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return false;
+        }
+
+        std::ofstream outFile(savePath, std::ios::binary);
+        if (!outFile.is_open()) {
+            outError = "Failed to open file for writing: " + savePath;
+            InternetCloseHandle(hRequest);
+            InternetCloseHandle(hConnect);
+            InternetCloseHandle(hInternet);
+            return false;
+        }
+
+        const DWORD BUFFER_SIZE = 8192;
+        char szBuffer[BUFFER_SIZE];
+        DWORD dwBytesRead = 0;
+
+        while (InternetReadFile(hRequest, szBuffer, BUFFER_SIZE, &dwBytesRead)) {
+            if (dwBytesRead == 0) break;
+            outFile.write(szBuffer, dwBytesRead);
+        }
+
+        outFile.close();
+
+        InternetCloseHandle(hRequest);
+        InternetCloseHandle(hConnect);
+        InternetCloseHandle(hInternet);
+
+        return true;
+    }
+
+    // ─── AppData Config Helpers ───
+
+    std::string Client::GetAppDataPath() {
+        char appDataBuf[MAX_PATH];
+        if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_APPDATA, NULL, 0, appDataBuf))) {
+            std::string basePath = std::string(appDataBuf) + "\\Authera\\" + m_AppId + "\\";
+            // Create directories if they don't exist
+            CreateDirectoryA((std::string(appDataBuf) + "\\Authera").c_str(), NULL);
+            CreateDirectoryA(basePath.c_str(), NULL);
+            return basePath;
+        }
+        return "";
+    }
+
+    void Client::SaveLocalConfig(const std::string& version, const std::string& filePath) {
+        std::string configPath = GetAppDataPath() + "config.json";
+        if (configPath.empty()) return;
+
+        json cfg;
+        cfg["version"] = version;
+        cfg["file_path"] = filePath;
+
+        std::ofstream out(configPath);
+        if (out.is_open()) {
+            out << cfg.dump(2);
+            out.close();
+        }
+    }
+
+    void Client::LoadLocalConfig(std::string& outVersion, std::string& outFilePath) {
+        outVersion = "";
+        outFilePath = "";
+
+        std::string configPath = GetAppDataPath() + "config.json";
+        if (configPath.empty()) return;
+
+        std::ifstream in(configPath);
+        if (!in.is_open()) return;
+
+        try {
+            std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+            auto cfg = json::parse(content);
+            outVersion = cfg.value("version", "");
+            outFilePath = cfg.value("file_path", "");
+        }
+        catch (...) {
+            // Corrupt config, treat as empty
+        }
+    }
+
+    // ─── Smart Auto-Update ───
+
+    UpdateResult Client::CheckForUpdate() {
+        UpdateResult result = { false, false, false, "", "", "" };
+
+        // 1. Load local config
+        std::string cachedVersion, cachedFilePath;
+        LoadLocalConfig(cachedVersion, cachedFilePath);
+
+        // 2. Check if cached file still exists on disk
+        bool hasFile = false;
+        if (!cachedFilePath.empty()) {
+            DWORD fileAttr = GetFileAttributesA(cachedFilePath.c_str());
+            hasFile = (fileAttr != INVALID_FILE_ATTRIBUTES && !(fileAttr & FILE_ATTRIBUTE_DIRECTORY));
+        }
+
+        // 3. Build payload
+        auto nowRaw = std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()).time_since_epoch().count();
+
+        json payload;
+        payload["app_id"] = m_AppId;
+        payload["timestamp"] = nowRaw;
+        payload["current_version"] = cachedVersion.empty() ? "0" : cachedVersion;
+        payload["has_file"] = hasFile;
+
+        std::string payloadStr = payload.dump();
+        std::string sig = GenerateHmacSha256(payloadStr, m_ClientKey);
+
+        // 4. Send request to server
+        std::string rawResp = SendPostRequest("/functions/v1/app-release-download", payloadStr, sig);
+
+        if (rawResp.empty()) {
+            result.Error = "Connection Failed";
+            return result;
+        }
+
+        // 5. Parse response
+        try {
+            auto resObj = json::parse(rawResp);
+
+            // Check for server error
+            if (resObj.contains("error")) {
+                result.Error = resObj["error"].get<std::string>();
+                return result;
+            }
+
+            result.Version = resObj.value("version", "");
+
+            // Case A: Already up to date
+            if (resObj.contains("up_to_date") && resObj["up_to_date"].get<bool>()) {
+                result.Success = true;
+                result.UpToDate = true;
+                result.FilePath = cachedFilePath;
+                return result;
+            }
+
+            // Case B: Need to download
+            if (!resObj.contains("download_url")) {
+                result.Error = "Server did not provide a download URL";
+                return result;
+            }
+
+            std::string downloadUrl = resObj["download_url"].get<std::string>();
+            std::string fileName = resObj.value("file_name", "release.bin");
+
+            // Download to AppData
+            std::string savePath = GetAppDataPath() + fileName;
+            std::string dlError;
+            bool ok = SendGetRequestToFile(downloadUrl, savePath, dlError);
+
+            if (!ok) {
+                result.Error = "Download failed: " + dlError;
+                return result;
+            }
+
+            // Save config
+            SaveLocalConfig(result.Version, savePath);
+
+            result.Success = true;
+            result.UpToDate = false;
+            result.FileDownloaded = true;
+            result.FilePath = savePath;
+            return result;
+        }
+        catch (const std::exception& e) {
+            result.Error = std::string("JSON Parse Error: ") + e.what();
+            return result;
+        }
     }
 
 } // namespace Authera

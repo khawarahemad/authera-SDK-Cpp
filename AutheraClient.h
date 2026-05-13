@@ -33,6 +33,15 @@ namespace Authera {
         std::string Error;
     };
 
+    struct UpdateResult {
+        bool Success;          // Did the operation succeed (no network errors)?
+        bool UpToDate;         // Is the client already on the latest version with file present?
+        bool FileDownloaded;   // Was a new file just downloaded this call?
+        std::string Version;   // The latest version string from the server (e.g. "1.2.0")
+        std::string FilePath;  // Full local path to the downloaded file on disk
+        std::string Error;     // Error message if Success is false
+    };
+
     class Client {
     public:
         /// <summary>
@@ -54,6 +63,13 @@ namespace Authera {
         /// </summary>
         LoginResult LoginUser(const std::string& username, const std::string& password);
 
+        /// <summary>
+        /// Smart auto-update check. Compares local cached version against the server.
+        /// Downloads the file only if necessary (new version, or file missing from disk).
+        /// Stores version + file path in %APPDATA%/Authera/<app_id>/config.json.
+        /// </summary>
+        UpdateResult CheckForUpdate();
+
     private:
         std::string m_AppId;
         std::string m_ClientKey;
@@ -62,6 +78,11 @@ namespace Authera {
         std::string GetHardwareId();
         std::string GenerateHmacSha256(const std::string& payload, const std::string& secret);
         std::string SendPostRequest(const std::string& endpoint, const std::string& payloadJson, const std::string& signature);
+        bool SendGetRequestToFile(const std::string& fullUrl, const std::string& savePath, std::string& outError);
+
+        std::string GetAppDataPath();
+        void SaveLocalConfig(const std::string& version, const std::string& filePath);
+        void LoadLocalConfig(std::string& outVersion, std::string& outFilePath);
     };
 
 } // namespace Authera
